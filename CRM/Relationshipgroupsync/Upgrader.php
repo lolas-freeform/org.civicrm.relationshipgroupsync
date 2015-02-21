@@ -12,6 +12,10 @@ class CRM_Relationshipgroupsync_Upgrader extends CRM_Relationshipgroupsync_Upgra
     $this->executeSqlFile('sql/install.sql');
   }
 
+  public function uninstall() {
+    $this->executeSqlFile('sql/uninstall.sql');
+  }
+
   /**
    * Example: Run an external SQL script when the module is installed
    *
