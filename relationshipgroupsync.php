@@ -114,48 +114,12 @@ function relationshipgroupsync_civicrm_alterSettingsFolders(&$metaDataFolders = 
  */
 function relationshipgroupsync_civicrm_post($op, $objectName, $objectId, &$objectRef) {
   $config = _relationshipgroupsync_getConfig();
-  // TODO: Act on all contact types in config
-  if ($objectName == 'Organization' && $op == 'create') {
-
-    // See if a group already exists - let's use source field for now
-    // If not create a smart group
-    dpm(array($objectId, $objectRef));
-    $organization = array();
-    $organization['id'] = $objectId;
-    $organization['display_name'] = $objectRef->display_name;
-    $organization['contact_sub_type'] = $objectRef->contact_sub_type;
-
-    foreach ($config['group_setup'] as $contact_type => $contact_sub_type) {
-      foreach ($contact_sub_type as $subType => $setup) {
-        $sourceCheck = _relationshipgroupsync_getgroupidentifier($organization['id'],
-          $subType, $setup['relationship_type_id']);
-        $exists = _relationshipgroupsync_checkforexistinggroup($sourceCheck);
-        if ($exists) {
-          CRM_Core_Session::setStatus(ts('Unable to create Smart group. It already exists.', 'Relationship Sync'));
-        }
-        else {
-          $result = _relationshipgroupsync_create_smart_group($objectId, $organization, $sourceCheck, $setup);
-          //TODO: Allow user to specify a naming pattern
-
-          dpm(array($result));
-          if ($result['is_error'] == 1) {
-            CRM_Core_Session::setStatus(ts('Unable to create Smart group', 'Relationship Sync'));
-          }
-        }
-      }
-    }
+  $baseTypes = array('Organization' => 1, 'Individual' => 1, 'Household' => 1);
+  if (isset($baseTypes[$objectName]) && isset($config[$objectName])) {
+    _relationshipgroupsync_contact_post($op, $objectName, $objectId, $objectRef, $config);
   }
-  else if ($objectName == 'Organization' && $op == 'edit') {
-    // TODO: Update group(s) title if needed
-  }
-  else if ($objectName == 'Organization' && $op == 'delete') {
-    // TODO: Delete related group(s) if needed
-  }
-  else if ($objectName == 'Organization' && $op == 'trash') {
-    // TODO: De-activate related group(s) if needed
-  }
-  else if ($objectName == 'Organization' && $op == 'restore') {
-    // TODO: Activate related group(s) if needed
+  else if ($objectName == 'Group') {
+    //TODO: Handle changes to groups
   }
 }
 
@@ -193,15 +157,15 @@ function _relationshipgroupsync_getgroupidentifier($orgId, $subType, $relType) {
  *
  * Copied in part from CRM/Contact/Form/Task/SaveSearch.php
  * @param $objectID
- * @param $objectRef
+ * @param $newContact
  * @param $sourceCheck
  * @param $setup
  * @return array|int
  */
-function _relationshipgroupsync_create_smart_group ($objectID, $objectRef, $sourceCheck, $setup) {
+function _relationshipgroupsync_create_smart_group ($objectID, $newContact, $sourceCheck, $relType, $setup) {
   $config = _relationshipgroupsync_getConfig();
   //save the search
-  $formValuesString = _relationshipgroupsync_buildFormValues($objectID, $setup);
+  $formValuesString = _relationshipgroupsync_buildFormValues($objectID, $relType, $setup['relationship_direction']);
   $savedSearch = new CRM_Contact_BAO_SavedSearch();
   $savedSearch->form_values = $formValuesString;
 
@@ -209,14 +173,16 @@ function _relationshipgroupsync_create_smart_group ($objectID, $objectRef, $sour
 
   // also create a group that is associated with this saved search only if new saved search
 
-  $title = ts('%1 (Related contacts)', array('1' => $objectRef['display_name']));
+  $title = ts('%1 (Related contacts)', array('1' => $newContact['display_name']));
   $params['title'] = $title;
-  $params['description'] = $config['default_description'];
+  $params = array('group' => 'org.civicrm.relationshipgroupsync', 'name' => 'default_description');
+  $description = civicrm_api3('Setting', 'getsingle', $params);
+  $params['description'] = $description;
 
 
-  // TODO: Allow description?
+  // TODO: Allow description per setup?
 
-  // TODO: Allow setting group type
+  // TODO: Allow setting group type per setup
   /*
   if (isset($formValues['group_type']) &&
     is_array($formValues['group_type'])
@@ -225,10 +191,10 @@ function _relationshipgroupsync_create_smart_group ($objectID, $objectRef, $sour
         array_keys($formValues['group_type'])
       ) . CRM_Core_DAO::VALUE_SEPARATOR;
   }
-  else {
-    $params['group_type'] = '';
-  } */
-  $params['group_type'] =
+ */
+  $params = array('group' => 'org.civicrm.relationshipgroupsync', 'name' => 'default_group_type');
+  $groupType = civicrm_api3('Setting', 'getsingle', $params);
+  $params['group_type'] = $groupType;
   $params['visibility'] = 'User and User Admin Only';
   $params['saved_search_id'] = $savedSearch->id;$params['saved_search_id'] = $savedSearch->id;
   $params['is_active'] = 1;
@@ -240,31 +206,80 @@ function _relationshipgroupsync_create_smart_group ($objectID, $objectRef, $sour
 }
 
 
-function _relationshipgroupsync_getConfig() {
-  // TODO: Support multiple domains
+function _relationshipgroupsync_getConfig($activeOnly = TRUE) {
+  // TODO: Test multiple domains
   $config = array();
-  // Format is contact type
-  $config['group_setup'] = array (
-    'Organization' => array(
-      '0' => array(
-        'contact_sub_type' => 0,
-        'relationship_type_id' => 5,
-        'relationship_direction' => 'a_b',
-        'group_type' => '',
-      ),
-    ),
-  );
-  $config['default_description'] = ts('Relationship Group Sync: Automatically generated group of related contacts.');
+  $params = array();
+  $results = civicrm_api3('GroupSyncConfig', 'get', $params);
+  if ($results['is_error'] == 0) {
+    foreach ($results['values'] as $setup) {
+      if (!$activeOnly || $setup['is_active']) {
+        $config[$setup['contact_type']][$setup['contact_subtype']][$setup['relationship_type_id']]
+          = array(
+          'group_type' => $setup['group_type'],
+          'relationship_direction' => $setup['relationship_direction'],
+          'description' => $setup['description'],
+        );
+      }
+    }
+  }
+
   return $config;
 }
 
-function _relationshipgroupsync_buildFormValues($objectID, $setup) {
-  //TODO: Build array and serialize?
-  $relationshipSearch = $setup['relationship_type_id'] . '_' . $setup['relationship_direction'];
-  $formValues1 = 'a:41:{s:12:"hidden_basic";s:1:"1";s:12:"contact_type";a:0:{}s:5:"group";a:0:{}s:10:"group_type";a:0:{}s:21:"group_search_selected";s:5:"group";s:12:"contact_tags";a:0:{}s:9:"sort_name";s:0:"";s:5:"email";s:0:"";s:14:"contact_source";s:0:"";s:9:"job_title";s:0:"";s:10:"contact_id";s:3:"' . $objectID .
-    '";s:19:"external_identifier";s:0:"";s:7:"uf_user";s:0:"";s:10:"tag_search";s:0:"";s:11:"uf_group_id";s:0:"";s:14:"component_mode";s:1:"7";s:8:"operator";s:3:"AND";s:25:"display_relationship_type";s:5:"' .
-    $relationshipSearch . '";s:15:"privacy_options";a:0:{}s:16:"privacy_operator";s:2:"OR";s:14:"privacy_toggle";s:1:"1";s:13:"email_on_hold";a:1:{s:7:"on_hold";s:0:"";}s:30:"preferred_communication_method";a:5:{i:1;s:0:"";i:2;s:0:"";i:3;s:0:"";i:4;s:0:"";i:5;s:0:"";}s:18:"preferred_language";s:0:"";s:13:"phone_numeric";s:0:"";s:22:"phone_location_type_id";s:0:"";s:19:"phone_phone_type_id";s:0:"";s:19:"hidden_relationship";s:1:"1";s:16:"relation_type_id";s:0:"";s:20:"relation_target_name";s:0:"";s:15:"relation_status";s:1:"2";s:19:"relation_permission";s:1:"0";s:21:"relation_target_group";a:0:{}s:28:"relation_start_date_relative";s:0:"";s:23:"relation_start_date_low";s:0:"";s:24:"relation_start_date_high";s:0:"";s:26:"relation_end_date_relative";s:0:"";s:21:"relation_end_date_low";s:0:"";s:22:"relation_end_date_high";s:0:"";s:4:"task";s:2:"14";s:8:"radio_ts";s:6:"ts_all";}';
-  $formValues = 'a:41:{s:12:"hidden_basic";s:1:"1";s:12:"contact_type";a:0:{}s:5:"group";a:0:{}s:10:"group_type";a:0:{}s:21:"group_search_selected";s:5:"group";s:12:"contact_tags";a:0:{}s:9:"sort_name";s:0:"";s:5:"email";s:0:"";s:14:"contact_source";s:0:"";s:9:"job_title";s:0:"";s:10:"contact_id";s:3:"170";s:19:"external_identifier";s:0:"";s:7:"uf_user";s:0:"";s:10:"tag_search";s:0:"";s:11:"uf_group_id";s:0:"";s:14:"component_mode";s:1:"7";s:8:"operator";s:3:"AND";s:25:"display_relationship_type";s:5:"5_a_b";s:15:"privacy_options";a:0:{}s:16:"privacy_operator";s:2:"OR";s:14:"privacy_toggle";s:1:"1";s:13:"email_on_hold";a:1:{s:7:"on_hold";s:0:"";}s:30:"preferred_communication_method";a:5:{i:1;s:0:"";i:2;s:0:"";i:3;s:0:"";i:4;s:0:"";i:5;s:0:"";}s:18:"preferred_language";s:0:"";s:13:"phone_numeric";s:0:"";s:22:"phone_location_type_id";s:0:"";s:19:"phone_phone_type_id";s:0:"";s:19:"hidden_relationship";s:1:"1";s:16:"relation_type_id";s:0:"";s:20:"relation_target_name";s:0:"";s:15:"relation_status";s:1:"2";s:19:"relation_permission";s:1:"0";s:21:"relation_target_group";a:0:{}s:28:"relation_start_date_relative";s:0:"";s:23:"relation_start_date_low";s:0:"";s:24:"relation_start_date_high";s:0:"";s:26:"relation_end_date_relative";s:0:"";s:21:"relation_end_date_low";s:0:"";s:22:"relation_end_date_high";s:0:"";s:4:"task";s:2:"14";s:8:"radio_ts";s:6:"ts_all";}';
-  dpm(array($formValues1, $formValues));
-  return $formValues1;
+function _relationshipgroupsync_buildFormValues($objectID, $relationship_type_id, $relationship_direction) {
+  $relationshipSearch = $relationship_type_id . '_' . $relationship_direction;
+  $params = array('group' => 'org.civicrm.relationshipgroupsync', 'name' => 'saved_search_template');
+  $formValues1 = civicrm_api3('Setting', 'getsingle', $params);
+  $formValues = unserialize($formValues1);
+  $formValues['display_relationship_type'] = $relationshipSearch;
+  $formValues['contact_id'] = $objectID;
+
+  return serialize($formValues);
+}
+
+function _relationshipgroupsync_contact_post($op, $objectName, $objectId, $objectRef, $config) {
+  if ($op == 'create') {
+
+    // See if a group already exists - let's use source field for now
+    // If not create a smart group
+    dpm(array($objectId, $objectRef));
+    $newContact = array();
+    $newContact['id'] = $objectId;
+    $newContact['display_name'] = $objectRef->display_name;
+    $newContact['contact_sub_type'] = $objectRef->contact_sub_type == '' ? 'all' : $objectRef->contact_sub_type;
+
+    $setups = $config[$objectName][$newContact['contact_sub_type']];
+
+    foreach ($setups as $relationship_type_id => $setup) {
+
+      $sourceCheck = _relationshipgroupsync_getgroupidentifier($newContact['id'],
+        $newContact['contact_sub_type'], $relationship_type_id);
+      $exists = _relationshipgroupsync_checkforexistinggroup($sourceCheck);
+      if ($exists) {
+        CRM_Core_Session::setStatus(ts('Unable to create Smart group. It already exists.', 'Relationship Sync'));
+      }
+      else {
+        $result = _relationshipgroupsync_create_smart_group($objectId, $newContact, $sourceCheck, $relationship_type_id, $setup);
+        //TODO: Allow user to specify a naming pattern for title
+
+        dpm(array($result));
+        if ($result['is_error'] == 1) {
+          CRM_Core_Session::setStatus(ts('Unable to create Smart group', 'Relationship Sync'));
+        }
+      }
+    }
+  }
+  else if ($op == 'edit') {
+    // TODO: Update group(s) title if needed or deal with change to contact_sub_type
+  }
+  else if ($op == 'delete') {
+    // TODO: Delete related group(s) if needed
+  }
+  else if ($op == 'trash') {
+    // TODO: De-activate related group(s) if needed
+  }
+  else if ($op == 'restore') {
+    // TODO: Activate related group(s) if needed
+  }
 }
